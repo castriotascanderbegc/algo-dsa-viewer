@@ -2,7 +2,10 @@ const express = require('express');     // express is a web framework
 const axios = require('axios');         // to fetch data fron Github API
 const cors = require('cors');           // to allow frontend requests
 const rateLimit = require('express-rate-limit'); // to limit the number of client requests
+const NodeCache = require("node-cache"); // to cache the fetched files
 require('dotenv').config();             // for storing API keys safely
+
+const cache = new NodeCache({ stdTTL: 60 * 60 }); // Cache expires after 1 hour
 
 const GITHUB_API = process.env.GITHUB_API; // Github API key
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME; // Github username
@@ -56,28 +59,43 @@ app.use('/file', apiLimiter);
 // ------------------------------------
 
 
-// Recursive function to fetch all files from GitHub Repository
-const fetchAllFiles = async (path = "") => {
-    const response = await axiosInstance.get(
-        `${GITHUB_API}/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${path}`
-    );
-
-    let files = [];
-
-    for (const item of response.data) {
-        if (item.type === "file") {
-            files.push({
-                name: item.name, 
-                path: item.path,
-            });
-        } else if (item.type === "dir") {
-            const nestedFiles = await fetchAllFiles(item.path);
-            files = files.concat(nestedFiles);
-        }
+// Fetch and cache the complete list of files initially
+const fetchAllFiles = async () => {
+    const cacheKey = "allFiles";
+  
+    // Serve from cache if available
+    if (cache.has(cacheKey)) {
+      console.log("Serving complete file list from cache");
+      return cache.get(cacheKey);
     }
-
-    return files;
-};
+  
+    // Helper to recursively fetch all files from GitHub
+    const fetchFilesRecursively = async (path = "") => {
+      const response = await axiosInstance.get(
+        `${GITHUB_API}/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${path}`
+      );
+  
+      let files = [];
+  
+      for (const item of response.data) {
+        if (item.type === "file") {
+          files.push({ name: item.name, path: item.path });
+        } else if (item.type === "dir") {
+          const nestedFiles = await fetchFilesRecursively(item.path);
+          files = files.concat(nestedFiles);
+        }
+      }
+  
+      return files;
+    };
+  
+    // Fetch the complete set once
+    const allFiles = await fetchFilesRecursively();
+  
+    // Cache the complete set
+    cache.set(cacheKey, allFiles);
+    return allFiles;
+  };
 
 // GET /files - Fetch all files from GitHub Repository recursively
 app.get("/files", async (req, res) => {
@@ -98,11 +116,26 @@ app.get("/file/*", async (req, res) => {
     try {
 
         const filePath = req.params[0];
+
+        const cacheKey = `file-${filePath}`;
+
+        // Check if file is already cached
+        if (cache.has(cacheKey)) {
+            console.log("Fetching file from cache");
+            return res.json(cache.get(cacheKey));
+        }
+
+
+        // Fetch file content from GitHub
         const response = await axiosInstance.get(
             `${GITHUB_API}/${GITHUB_USERNAME}/${GITHUB_REPO}/contents/${filePath}`
         );
 
         const fileContent = Buffer.from(response.data.content, "base64").toString("utf8");
+
+        // Cache the fetched file
+        cache.set(cacheKey, { name: response.data.name, content: fileContent });
+
         res.json({ name: response.data.name, content: fileContent });
 
     } catch (error) {
@@ -115,6 +148,8 @@ app.get("/file/*", async (req, res) => {
 app.get("/search", async (req, res) => {
     try {
         const { query } = req.query;
+        if (!query) return res.status(400).json({ error: "Query is required" });
+        
         const allFiles = await fetchAllFiles();
 
         const matchedFiles = allFiles.filter((file) => 
