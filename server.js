@@ -1,6 +1,7 @@
 const express = require('express');     // express is a web framework
 const axios = require('axios');         // to fetch data fron Github API
 const cors = require('cors');           // to allow frontend requests
+const rateLimit = require('express-rate-limit'); // to limit the number of client requests
 require('dotenv').config();             // for storing API keys safely
 
 const GITHUB_API = process.env.GITHUB_API; // Github API key
@@ -32,6 +33,28 @@ const axiosInstance = axios.create({
         Accept: "application/vnd.github.v3+json",
     },
 });
+
+// ------ RATE LIMITER SETUP -------
+const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,            // 1 minute window
+    max: 30,                        // Limit each IP to 30 requests per minute per IP (~1800/hour per IP)
+    standardHeaders: true,          // Return rate limit info in headers
+    legacyHeaders: false,
+    handler: function (req, res) {
+        res.status(429).json({ 
+            error: "Too many requests from this IP, please try again after a minute."
+        });
+    },
+});
+
+// Apply rate limiter to all requests
+app.use('/search', apiLimiter);
+app.use('/filter', apiLimiter);
+app.use('/files', apiLimiter);
+app.use('/file', apiLimiter);
+
+// ------------------------------------
+
 
 // Recursive function to fetch all files from GitHub Repository
 const fetchAllFiles = async (path = "") => {
